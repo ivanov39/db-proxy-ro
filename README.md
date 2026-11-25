@@ -43,6 +43,70 @@ app_db=> delete from users;
 ERROR:  db-proxy-ro: DELETE statements are not allowed: the proxy is read-only
 ```
 
+## Listing databases
+
+Each client lists databases its own native way, and sees the databases
+configured in the proxy for that DBMS — not the databases of the server
+behind it.
+
+**PostgreSQL** — `\l` in `psql`, the database tree of GUI tools, or any query
+on `pg_database`:
+
+```
+app_db=> \l
+app_db=> select datname from pg_database;
+```
+
+The proxy rewrites references to the `pg_database` catalog table so that it
+holds one row per proxy database; `current_database()` returns the name you
+connected with. The other columns (owner, encoding, collation, …) are copied
+from the database the session is connected to. To switch, reconnect — `\c
+other_db` in `psql`. Requires PostgreSQL 12 or newer on the backend.
+
+A PostgreSQL connection always goes to some database. A client that names
+none (it then sends its user name, or `postgres`) is connected to the default
+database: `DBPROXY_PGSQL_DEFAULT_DB`, or the first one by name. From there it
+can list the others. Any other unknown name is an error that lists the
+available ones.
+
+**MySQL** — `SHOW DATABASES` (also with `LIKE 'pattern'`):
+
+```sh
+mysql -h 127.0.0.1 -P 23306 --protocol=tcp
+mysql> show databases;
+mysql> use app_db;
+```
+
+A client that names no database is connected to the default one:
+`DBPROXY_MYSQL_DEFAULT_DB`, or the first one by name. `USE` with a name from
+the list switches the session to that database, even when it lives on another
+server; any other name is a schema of the current server.
+`SHOW DATABASES` must be sent as a plain
+query, not as a prepared statement.
+
+### All MySQL databases in one session
+
+GUI tools build their schema tree from `information_schema` over a single
+connection. So that the tree shows every database of the proxy, not just the
+one the session is connected to, the proxy (with `DBPROXY_MYSQL_ALL_DATABASES`
+on, the default):
+
+* runs a `SELECT` on `information_schema` on **every** MySQL database of the
+  proxy and returns the rows of all of them, without duplicates. If the query
+  names a schema (`where table_schema = 'app_db'`), only that database is asked;
+* runs a `SELECT` that names another database (`select … from other_db.t`) on
+  that database.
+
+The extra backend connections are opened on first use, one per database, are
+read-only like the main one, and are closed when the client disconnects. Mind
+the connection limits of your servers: one client session can hold a
+connection to every configured database.
+
+Limits: merged rows are not re-sorted, so `ORDER BY`, `LIMIT` and aggregates
+apply per database; a query that joins tables of two proxy databases is not
+supported; routing works by the real schema name, and only for plain
+(not prepared) queries.
+
 ## Database parameters
 
 One TOML file per database, in `params/pgsql/` or `params/mysql/`:
@@ -79,6 +143,9 @@ Environment variables; with Docker Compose put them into `.env`
 |---|---|---|
 | `DBPROXY_PGSQL_LISTEN` | `127.0.0.1:25432` | Address for PostgreSQL clients |
 | `DBPROXY_MYSQL_LISTEN` | `127.0.0.1:23306` | Address for MySQL clients |
+| `DBPROXY_PGSQL_DEFAULT_DB` | first by name | Database for PostgreSQL clients that name none |
+| `DBPROXY_MYSQL_DEFAULT_DB` | first by name | Database for MySQL clients that name none |
+| `DBPROXY_MYSQL_ALL_DATABASES` | `true` | One MySQL session sees all proxy databases (see “Listing databases”) |
 | `DBPROXY_LOG_LEVEL` | `info` | Service log level: `debug`, `info`, `warn`, `error` |
 | `DBPROXY_CONNECT_TIMEOUT` | `10s` | Time limit for connecting to a backend |
 | `DBPROXY_MYSQL_SERVER_VERSION` | `8.0.36-db-proxy-ro` | Version shown to MySQL clients in the greeting |

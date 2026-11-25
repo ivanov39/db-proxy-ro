@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/ivanov39/db-proxy-ro/internal/domain"
+	"github.com/ivanov39/db-proxy-ro/internal/domain/proxycmd"
 	"github.com/ivanov39/db-proxy-ro/internal/domain/sqlguard"
 )
 
@@ -56,4 +57,41 @@ func (g *Gatekeeper) Completed(s Session, kind, sql string, o Outcome) {
 		Session: s, Kind: kind, SQL: sql, Allowed: true,
 		Duration: o.Duration, Rows: o.Rows, Error: o.Error,
 	})
+}
+
+// Databases returns the names of the databases configured for a DBMS.
+func (g *Gatekeeper) Databases(dbms domain.DBMS) []string {
+	return g.catalog.Names(dbms)
+}
+
+// ListDatabases answers SHOW DATABASES: the proxy's own databases of the
+// session's DBMS, not those of the backend server. The request is logged.
+func (g *Gatekeeper) ListDatabases(s Session, sql string, cmd proxycmd.Command) []string {
+	names := cmd.Filter(g.catalog.Names(s.DBMS))
+	g.audit.Record(QueryRecord{Session: s, Kind: "proxy", SQL: sql, Allowed: true, Rows: int64(len(names))})
+	return names
+}
+
+// PgCatalogView rewrites an allowed PostgreSQL query so that the server's
+// list of databases (pg_database) shows the proxy's databases instead. This
+// is the native way PostgreSQL clients list databases: psql's \l and the
+// database trees of GUI tools. Queries that do not touch the list are
+// returned unchanged.
+func (g *Gatekeeper) PgCatalogView(s Session, sql string) string {
+	target, err := g.catalog.Lookup(domain.PostgreSQL, s.Database)
+	if err != nil {
+		return sql
+	}
+	view := sqlguard.PgDatabases{
+		Names:   g.catalog.Names(domain.PostgreSQL),
+		Current: s.Database,
+		Real:    target.Database,
+	}
+	rewritten, _ := view.Virtualize(sql)
+	return rewritten
+}
+
+// Targets returns every database configured for a DBMS.
+func (g *Gatekeeper) Targets(dbms domain.DBMS) []domain.Target {
+	return g.catalog.Targets(dbms)
 }

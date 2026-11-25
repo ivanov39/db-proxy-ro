@@ -60,3 +60,12 @@ func (c *Catalog) Names(dbms DBMS) []string {
 	sort.Strings(names)
 	return names
 }
+
+// Targets returns the targets of a DBMS, sorted by name.
+func (c *Catalog) Targets(dbms DBMS) []Target {
+	var targets []Target
+	for _, name := range c.Names(dbms) {
+		targets = append(targets, c.targets[catalogKey{dbms, name}])
+	}
+	return targets
+}

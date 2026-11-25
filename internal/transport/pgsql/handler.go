@@ -33,6 +33,7 @@ type Handler struct {
 	gate           *usecase.Gatekeeper
 	log            *slog.Logger
 	connectTimeout time.Duration
+	defaultDB      string
 	nextID         atomic.Uint64
 
 	// cancels maps the cancellation key given to a client to the backend it
@@ -41,8 +42,11 @@ type Handler struct {
 	cancels map[string]string
 }
 
-func NewHandler(gate *usecase.Gatekeeper, log *slog.Logger, connectTimeout time.Duration) *Handler {
-	return &Handler{gate: gate, log: log, connectTimeout: connectTimeout, cancels: make(map[string]string)}
+// NewHandler returns a handler. defaultDB is the database given to clients
+// that do not name one; it may be empty.
+func NewHandler(gate *usecase.Gatekeeper, log *slog.Logger, connectTimeout time.Duration, defaultDB string) *Handler {
+	return &Handler{gate: gate, log: log, connectTimeout: connectTimeout, defaultDB: defaultDB,
+		cancels: make(map[string]string)}
 }
 
 func cancelKey(pid uint32, key []byte) string {
@@ -77,6 +81,14 @@ func (h *Handler) Serve(ctx context.Context, client net.Conn) {
 	if info.Database == "" {
 		info.Database = info.ClientUser // PostgreSQL's own default
 	}
+	// A client that names no database sends its user name instead (or
+	// "postgres", the conventional maintenance database). Neither is a real
+	// choice, so such a client gets the default database. Any other unknown
+	// name is an error: a typo must not silently lead to another database.
+	if _, err := h.gate.Resolve(domain.PostgreSQL, info.Database); err != nil && h.defaultDB != "" &&
+		(info.Database == info.ClientUser || info.Database == "postgres") {
+		info.Database = h.defaultDB
+	}
 	log = log.With("db", info.Database)
 
 	if _, ok := params["replication"]; ok {
@@ -86,7 +98,8 @@ func (h *Handler) Serve(ctx context.Context, client net.Conn) {
 	}
 	target, err := h.gate.Resolve(domain.PostgreSQL, info.Database)
 	if err != nil {
-		fatal(client, "3D000", fmt.Sprintf("db-proxy-ro: database %q is not configured", info.Database))
+		fatal(client, "3D000", fmt.Sprintf("db-proxy-ro: database %q is not configured; available: %s",
+			info.Database, strings.Join(h.gate.Databases(domain.PostgreSQL), ", ")))
 		log.Warn("unknown database requested")
 		return
 	}

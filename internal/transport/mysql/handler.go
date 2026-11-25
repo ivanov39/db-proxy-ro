@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -24,19 +23,29 @@ import (
 
 const handshakeTimeout = 30 * time.Second
 
-// Handler serves MySQL client connections.
-type Handler struct {
-	gate           *usecase.Gatekeeper
-	log            *slog.Logger
-	connectTimeout time.Duration
-	serverVersion  string
-	nextID         atomic.Uint64
+// Options configure the MySQL side of the proxy.
+type Options struct {
+	ConnectTimeout time.Duration
+	// ServerVersion is shown to clients in the greeting, which is sent
+	// before the backend is known.
+	ServerVersion string
+	// DefaultDB is the database given to clients that name none.
+	DefaultDB string
+	// AllDatabases lets one session see every database of the proxy, as if
+	// they were schemas of one server (see crossdb.go).
+	AllDatabases bool
 }
 
-// NewHandler returns a handler. serverVersion is the version string shown to
-// clients in the greeting, which is sent before the backend is known.
-func NewHandler(gate *usecase.Gatekeeper, log *slog.Logger, connectTimeout time.Duration, serverVersion string) *Handler {
-	return &Handler{gate: gate, log: log, connectTimeout: connectTimeout, serverVersion: serverVersion}
+// Handler serves MySQL client connections.
+type Handler struct {
+	gate   *usecase.Gatekeeper
+	log    *slog.Logger
+	opts   Options
+	nextID atomic.Uint64
+}
+
+func NewHandler(gate *usecase.Gatekeeper, log *slog.Logger, opts Options) *Handler {
+	return &Handler{gate: gate, log: log, opts: opts}
 }
 
 // Serve runs one client connection from handshake to disconnect.
@@ -60,42 +69,29 @@ func (h *Handler) Serve(ctx context.Context, raw net.Conn) {
 	client.SetDeadline(time.Time{})
 
 	info.ClientUser, info.Database = hello.user, hello.database
-	log = log.With("db", info.Database)
 
-	if info.Database == "" {
-		client.send((&serverError{1046, "3D000", "db-proxy-ro: no database selected; " +
-			"a database name is required to choose the backend"}).packet())
-		log.Warn("client did not name a database")
+	s := &session{h: h, ctx: ctx, log: log, info: info, hello: hello, client: client,
+		statements: make(map[uint32]string), secondaries: make(map[string]*conn)}
+	defer s.close()
+
+	// A client that names no database gets the default one. It can then
+	// list the databases and switch with USE.
+	name := info.Database
+	if name == "" {
+		name = h.opts.DefaultDB
+	}
+	if name == "" {
+		client.send((&serverError{1046, "3D000", "db-proxy-ro: no MySQL databases are configured"}).packet())
 		return
 	}
-	target, err := h.gate.Resolve(domain.MySQL, info.Database)
-	if err != nil {
-		client.send((&serverError{1049, "42000",
-			fmt.Sprintf("db-proxy-ro: database '%s' is not configured", info.Database)}).packet())
-		log.Warn("unknown database requested")
+	status, srvErr := s.attach(name)
+	if srvErr != nil {
+		client.send(srvErr.packet())
 		return
 	}
-
-	dialCtx, cancel := context.WithTimeout(ctx, h.connectTimeout)
-	backend, status, err := dialBackend(dialCtx, target, hello)
-	cancel()
-	if err != nil {
-		log.Error("backend connection failed", "backend", target.Addr(), "error", err)
-		reply := &serverError{2003, "HY000", "db-proxy-ro: cannot connect to the backend: " + err.Error()}
-		var srvErr *serverError
-		if errors.As(err, &srvErr) {
-			reply = &serverError{srvErr.Code, srvErr.State, "db-proxy-ro: backend refused the connection: " + srvErr.Message}
-		}
-		client.send(reply.packet())
-		return
-	}
-	defer backend.Close()
-
 	if err := client.send(okPacket(status)); err != nil {
 		return
 	}
-	log.Debug("session opened", "backend", target.Addr())
-	s := &session{gate: h.gate, info: info, client: client, backend: backend, statements: make(map[uint32]string)}
 	if err := s.run(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 		log.Warn("session ended with an error", "error", err)
 	}
@@ -114,7 +110,7 @@ func (h *Handler) handshake(client *conn, connID uint32) (clientHello, error) {
 
 	caps := offeredCaps // a variable: the constant does not fit the byte conversions below
 	g := []byte{10}
-	g = append(append(g, h.serverVersion...), 0)
+	g = append(append(g, h.opts.ServerVersion...), 0)
 	g = appendUint32(g, connID)
 	g = append(append(g, salt[:8]...), 0)
 	g = append(g, byte(caps), byte(caps>>8))

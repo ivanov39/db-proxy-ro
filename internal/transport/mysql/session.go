@@ -1,20 +1,33 @@
 package mysql
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/ivanov39/db-proxy-ro/internal/domain"
+	"github.com/ivanov39/db-proxy-ro/internal/domain/proxycmd"
 	"github.com/ivanov39/db-proxy-ro/internal/usecase"
 )
 
 // session relays one client connection to one backend connection.
 type session struct {
-	gate    *usecase.Gatekeeper
-	info    usecase.Session
+	h     *Handler
+	ctx   context.Context
+	log   *slog.Logger
+	info  usecase.Session
+	hello clientHello
+
 	client  *conn
 	backend *conn
+	target  domain.Target
+	// secondaries are connections to the other databases of the proxy,
+	// opened on demand when AllDatabases is on. Keyed by catalog name.
+	secondaries map[string]*conn
 
 	statements map[uint32]string // prepared statement id -> SQL
 	head       [headLen]byte     // first bytes of the packet being relayed
@@ -42,7 +55,14 @@ func (s *session) run() error {
 			s.backend.seq = 0
 			return s.backend.send(cmd)
 		}
-		if err := s.dispatch(cmd); err != nil {
+		handled, err := s.proxyCommand(cmd)
+		if err != nil {
+			return err
+		}
+		if !handled {
+			err = s.dispatch(cmd)
+		}
+		if err != nil {
 			return err
 		}
 		if err := s.client.flush(); err != nil {
@@ -51,12 +71,140 @@ func (s *session) run() error {
 	}
 }
 
+// close releases the backend connection, if any.
+func (s *session) close() {
+	if s.backend != nil {
+		s.backend.Close()
+	}
+	for name, c := range s.secondaries {
+		c.Close()
+		delete(s.secondaries, name)
+	}
+}
+
+// attach connects the session to a database of the catalog, replacing the
+// current backend if there is one. It returns the server status flags, or
+// the error to show to the client.
+func (s *session) attach(name string) (uint16, *serverError) {
+	log := s.log.With("db", name)
+	target, ok := s.lookup(name)
+	if !ok {
+		log.Warn("unknown database requested")
+		return 0, &serverError{1049, "42000", fmt.Sprintf("db-proxy-ro: database '%s' is not configured; available: %s",
+			name, strings.Join(s.h.gate.Databases(domain.MySQL), ", "))}
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, s.h.opts.ConnectTimeout)
+	backend, status, err := dialBackend(ctx, target, s.hello)
+	cancel()
+	if err != nil {
+		log.Error("backend connection failed", "backend", target.Addr(), "error", err)
+		var srvErr *serverError
+		if errors.As(err, &srvErr) {
+			return 0, &serverError{srvErr.Code, srvErr.State, "db-proxy-ro: backend refused the connection: " + srvErr.Message}
+		}
+		return 0, &serverError{2003, "HY000", "db-proxy-ro: cannot connect to the backend: " + err.Error()}
+	}
+	if s.backend != nil {
+		s.backend.Close()
+	}
+	if c, ok := s.secondaries[name]; ok {
+		c.Close()
+		delete(s.secondaries, name)
+	}
+	s.backend = backend
+	s.target = target
+	s.info.Database = target.Name
+	clear(s.statements)
+	log.Debug("session attached", "backend", target.Addr())
+	return status, nil
+}
+
+// proxyCommand handles what the proxy answers itself: SHOW DATABASES and
+// USE with a database of the catalog. It reports whether the command was
+// handled.
+func (s *session) proxyCommand(cmd []byte) (bool, error) {
+	var pc proxycmd.Command
+	switch cmd[0] {
+	case comQuery, comStmtPrepare:
+		pc = proxycmd.Parse(string(cmd[1:]))
+	case comInitDB:
+		pc = proxycmd.Command{Kind: proxycmd.Use, Name: string(cmd[1:])}
+	}
+	sql := string(cmd[1:])
+
+	switch {
+	case pc.Kind == proxycmd.ShowDatabases && cmd[0] == comQuery:
+		return true, s.replyDatabases(s.h.gate.ListDatabases(s.info, sql, pc))
+
+	case pc.Kind == proxycmd.ShowDatabases || pc.Kind == proxycmd.Unsupported:
+		s.h.gate.Refuse(s.info, "query", sql, proxycmd.UnsupportedReason)
+		return true, s.reply(&serverError{1235, "42000", "db-proxy-ro: " + proxycmd.UnsupportedReason})
+
+	case pc.Kind == proxycmd.Use && cmd[0] != comStmtPrepare &&
+		(pc.Name == s.info.Database || pc.Name == s.target.Database):
+		// Back to the session's own database, whose real name may differ
+		// from the one the client knows.
+		return true, s.dispatch(append([]byte{comInitDB}, s.target.Database...))
+
+	case pc.Kind == proxycmd.Use && cmd[0] != comStmtPrepare:
+		// A database of the catalog: switch backends. Any other name is a
+		// schema of the current server and goes to it.
+		if _, ok := s.lookup(pc.Name); !ok {
+			return false, nil
+		}
+		start := time.Now()
+		status, srvErr := s.attach(pc.Name)
+		if srvErr != nil {
+			s.h.gate.Refuse(s.info, "use", pc.Name, srvErr.Message)
+			return true, s.reply(srvErr)
+		}
+		s.h.gate.Completed(s.info, "use", pc.Name, usecase.Outcome{Duration: time.Since(start)})
+		return true, s.client.writePacket(okPacket(status))
+	}
+
+	return false, nil
+}
+
+// replyDatabases sends the result of SHOW DATABASES: a result set of one
+// text column made by the proxy.
+func (s *session) replyDatabases(values []string) error {
+	const name = "Database"
+	lenencString := func(b []byte, v string) []byte {
+		return append(appendLenenc(b, uint64(len(v))), v...)
+	}
+	column := lenencString(nil, "def")
+	column = lenencString(column, "") // schema
+	column = lenencString(column, "") // table
+	column = lenencString(column, "") // original table
+	column = lenencString(column, name)
+	column = lenencString(column, "")            // original name
+	column = append(column, 0x0c, 45, 0)         // fixed-length part follows; utf8mb4
+	column = appendUint32(column, 256)           // column length
+	column = append(column, 0xfd, 0, 0, 0, 0, 0) // VAR_STRING, no flags, no decimals
+
+	eof := []byte{pktEOF, 0, 0, byte(statusAutocommit), byte(statusAutocommit >> 8)}
+	packets := [][]byte{{1}, column, eof}
+	for _, v := range values {
+		packets = append(packets, lenencString(nil, v))
+	}
+	packets = append(packets, eof)
+	for _, p := range packets {
+		if err := s.client.writePacket(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *session) dispatch(cmd []byte) error {
 	switch cmd[0] {
 	case comQuery:
 		sql := string(cmd[1:])
 		if !s.inspect("query", sql) {
 			return nil
+		}
+		if handled, err := s.crossDatabase(sql, cmd); handled {
+			return err
 		}
 		return s.logged("query", sql, cmd, s.relayResults)
 
@@ -106,7 +254,7 @@ func (s *session) dispatch(cmd []byte) error {
 			name = fmt.Sprintf("command 0x%02x", cmd[0])
 		}
 		const reason = "this protocol command is not allowed"
-		s.gate.Refuse(s.info, "command", name, reason)
+		s.h.gate.Refuse(s.info, "command", name, reason)
 		return s.reply(&serverError{1047, "08S01", "db-proxy-ro: " + name + ": " + reason})
 	}
 }
@@ -114,7 +262,7 @@ func (s *session) dispatch(cmd []byte) error {
 // inspect asks the guard about a SQL text and answers the client itself if
 // the text is refused.
 func (s *session) inspect(kind, sql string) bool {
-	dec := s.gate.Inspect(s.info, kind, sql)
+	dec := s.h.gate.Inspect(s.info, kind, sql)
 	if !dec.Allowed {
 		// 1792 = ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION
 		s.reply(&serverError{1792, "25006", "db-proxy-ro: " + dec.Reason})
@@ -151,7 +299,7 @@ func (s *session) logged(kind, sql string, cmd []byte, relay func() (result, err
 	if err != nil {
 		res.err = "connection lost: " + err.Error()
 	}
-	s.gate.Completed(s.info, kind, sql, usecase.Outcome{Duration: time.Since(start), Rows: res.rows, Error: res.err})
+	s.h.gate.Completed(s.info, kind, sql, usecase.Outcome{Duration: time.Since(start), Rows: res.rows, Error: res.err})
 	return err
 }
 

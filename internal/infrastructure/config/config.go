@@ -15,6 +15,9 @@ type Config struct {
 	ParamsDir          string        // DBPROXY_PARAMS_DIR
 	PgSQLListen        string        // DBPROXY_PGSQL_LISTEN
 	MySQLListen        string        // DBPROXY_MYSQL_LISTEN
+	PgSQLDefaultDB     string        // DBPROXY_PGSQL_DEFAULT_DB
+	MySQLDefaultDB     string        // DBPROXY_MYSQL_DEFAULT_DB
+	MySQLAllDatabases  bool          // DBPROXY_MYSQL_ALL_DATABASES
 	MySQLServerVersion string        // DBPROXY_MYSQL_SERVER_VERSION
 	ConnectTimeout     time.Duration // DBPROXY_CONNECT_TIMEOUT
 	ShutdownTimeout    time.Duration // DBPROXY_SHUTDOWN_TIMEOUT
@@ -28,6 +31,8 @@ func FromEnv() (Config, error) {
 		ParamsDir:          env("DBPROXY_PARAMS_DIR", "params"),
 		PgSQLListen:        env("DBPROXY_PGSQL_LISTEN", "127.0.0.1:25432"),
 		MySQLListen:        env("DBPROXY_MYSQL_LISTEN", "127.0.0.1:23306"),
+		PgSQLDefaultDB:     env("DBPROXY_PGSQL_DEFAULT_DB", ""),
+		MySQLDefaultDB:     env("DBPROXY_MYSQL_DEFAULT_DB", ""),
 		MySQLServerVersion: env("DBPROXY_MYSQL_SERVER_VERSION", "8.0.36-db-proxy-ro"),
 	}
 	var err error
@@ -39,6 +44,9 @@ func FromEnv() (Config, error) {
 	}
 	if err = c.LogLevel.UnmarshalText([]byte(env("DBPROXY_LOG_LEVEL", "info"))); err != nil {
 		return c, fmt.Errorf("DBPROXY_LOG_LEVEL: %w", err)
+	}
+	if c.MySQLAllDatabases, err = strconv.ParseBool(env("DBPROXY_MYSQL_ALL_DATABASES", "true")); err != nil {
+		return c, fmt.Errorf("DBPROXY_MYSQL_ALL_DATABASES: want true or false")
 	}
 	raw := env("DBPROXY_LOG_SQL_MAX_LEN", "8192")
 	if c.LogSQLMaxLen, err = strconv.Atoi(raw); err != nil || c.LogSQLMaxLen < 0 {

@@ -27,6 +27,8 @@ const (
 type token struct {
 	kind tokenKind
 	text string
+	pos  int // offset of the token in the query
+	end  int // offset just past it
 }
 
 func (t token) isPunct(s string) bool { return t.kind == kindPunct && t.text == s }
@@ -66,6 +68,9 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 	n := len(sql)
 	i := 0
 	for i < n {
+		// Every case below appends at most one token, which starts at i and
+		// ends where the case leaves i.
+		start, count := i, len(toks)
 		c := sql[i]
 		switch {
 		case isSpace(c):
@@ -94,7 +99,7 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 			if err != nil {
 				return nil, err
 			}
-			toks = append(toks, token{kindString, sql[i+1 : end-1]})
+			toks = append(toks, token{kind: kindString, text: sql[i+1 : end-1]})
 			i = end
 
 		case c == '"':
@@ -103,7 +108,7 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 			if err != nil {
 				return nil, err
 			}
-			toks = append(toks, token{kindQuoted, strings.ReplaceAll(sql[i+1:end-1], `""`, `"`)})
+			toks = append(toks, token{kind: kindQuoted, text: strings.ReplaceAll(sql[i+1:end-1], `""`, `"`)})
 			i = end
 
 		case c == '`' && d == MySQL:
@@ -111,7 +116,7 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 			if err != nil {
 				return nil, err
 			}
-			toks = append(toks, token{kindQuoted, strings.ReplaceAll(sql[i+1:end-1], "``", "`")})
+			toks = append(toks, token{kind: kindQuoted, text: strings.ReplaceAll(sql[i+1:end-1], "``", "`")})
 			i = end
 
 		case c == '$' && d == Postgres:
@@ -120,7 +125,7 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 				for j < n && isDigit(sql[j]) {
 					j++
 				}
-				toks = append(toks, token{kindParam, sql[i:j]})
+				toks = append(toks, token{kind: kindParam, text: sql[i:j]})
 				i = j
 				break
 			}
@@ -130,11 +135,11 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 				if closeAt < 0 {
 					return nil, errors.New("unterminated dollar-quoted string")
 				}
-				toks = append(toks, token{kindString, sql[tagEnd : tagEnd+closeAt]})
+				toks = append(toks, token{kind: kindString, text: sql[tagEnd : tagEnd+closeAt]})
 				i = tagEnd + closeAt + len(tag)
 				break
 			}
-			toks = append(toks, token{kindPunct, "$"})
+			toks = append(toks, token{kind: kindPunct, text: "$"})
 			i++
 
 		case isDigit(c) || (c == '.' && i+1 < n && isDigit(sql[i+1])):
@@ -142,7 +147,7 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 			for j < n && (isDigit(sql[j]) || sql[j] == '.' || isIdentStart(sql[j]) || (d == MySQL && sql[j] == '$')) {
 				j++
 			}
-			toks = append(toks, token{kindNumber, sql[i:j]})
+			toks = append(toks, token{kind: kindNumber, text: sql[i:j]})
 			i = j
 
 		case isIdentStart(c):
@@ -159,19 +164,22 @@ func lex(sql string, d Dialect, m lexMode) ([]token, error) {
 					if err != nil {
 						return nil, err
 					}
-					toks = append(toks, token{kindString, sql[j+1 : end-1]})
+					toks = append(toks, token{kind: kindString, text: sql[j+1 : end-1], pos: start, end: end})
 					i = end
 					continue
 				case (word == "U" || word == "u") && sql[j] == '&' && j+1 < n && sql[j+1] == '"':
 					return nil, errors.New(`Unicode-escaped identifiers (U&"...") are not allowed`)
 				}
 			}
-			toks = append(toks, token{kindWord, strings.ToUpper(word)})
+			toks = append(toks, token{kind: kindWord, text: strings.ToUpper(word)})
 			i = j
 
 		default:
-			toks = append(toks, token{kindPunct, sql[i : i+1]})
+			toks = append(toks, token{kind: kindPunct, text: sql[i : i+1]})
 			i++
+		}
+		if len(toks) > count {
+			toks[count].pos, toks[count].end = start, i
 		}
 	}
 	return toks, nil

@@ -138,6 +138,9 @@ func (s *session) clientLoop() error {
 			sql, _ := cstring(body)
 			if dec := s.gate.Inspect(s.info, "query", sql); dec.Allowed {
 				s.extend(false, entry{kind: "query", sql: sql})
+				if view := s.gate.PgCatalogView(s.info, sql); view != sql {
+					body = append([]byte(view), 0)
+				}
 				writeFrame(s.toSrv, typ, body)
 			} else {
 				s.refuse(dec.Reason)
@@ -161,13 +164,18 @@ func (s *session) clientLoop() error {
 				continue
 			}
 			name, rest := cstring(body)
-			sql, _ := cstring(rest)
+			sql, tail := cstring(rest)
 			if dec := s.gate.Inspect(s.info, "parse", sql); !dec.Allowed {
 				s.tellRefused(dec.Reason)
 				discard = true
 				continue
 			}
 			s.statements[name] = sql
+			if view := s.gate.PgCatalogView(s.info, sql); view != sql {
+				// Rebuild the message: name, query, parameter types.
+				body = append(append([]byte(name), 0), view...)
+				body = append(append(body, 0), tail...)
+			}
 			writeFrame(s.toSrv, typ, body)
 
 		case msgBind:

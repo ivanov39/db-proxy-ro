@@ -46,12 +46,33 @@ func New(cfg config.Config, serviceLog, queryLog io.Writer) (*App, error) {
 		log.Info("databases loaded", "dbms", dbms.String(), "count", len(names), "names", names)
 	}
 
+	// A connection always goes to some database. Clients that name none
+	// land on the default one, from where they can list the rest.
+	defaults := map[domain.DBMS]string{
+		domain.PostgreSQL: cfg.PgSQLDefaultDB,
+		domain.MySQL:      cfg.MySQLDefaultDB,
+	}
+	for dbms, name := range defaults {
+		if name == "" {
+			if names := catalog.Names(dbms); len(names) > 0 {
+				defaults[dbms] = names[0]
+			}
+		} else if _, err := catalog.Lookup(dbms, name); err != nil {
+			return nil, fmt.Errorf("default %s database: %w", dbms, err)
+		}
+	}
+
 	gate := usecase.NewGatekeeper(catalog, logging.NewQueryLog(queryLog, cfg.LogSQLMaxLen))
 	a := &App{
 		cfg:   cfg,
 		log:   log,
-		pgsql: netserver.New("pgsql", pgsql.NewHandler(gate, log, cfg.ConnectTimeout), log),
-		mysql: netserver.New("mysql", mysql.NewHandler(gate, log, cfg.ConnectTimeout, cfg.MySQLServerVersion), log),
+		pgsql: netserver.New("pgsql", pgsql.NewHandler(gate, log, cfg.ConnectTimeout, defaults[domain.PostgreSQL]), log),
+		mysql: netserver.New("mysql", mysql.NewHandler(gate, log, mysql.Options{
+			ConnectTimeout: cfg.ConnectTimeout,
+			ServerVersion:  cfg.MySQLServerVersion,
+			DefaultDB:      defaults[domain.MySQL],
+			AllDatabases:   cfg.MySQLAllDatabases,
+		}), log),
 	}
 	if err := a.pgsql.Listen(cfg.PgSQLListen); err != nil {
 		return nil, fmt.Errorf("listen for PostgreSQL clients: %w", err)

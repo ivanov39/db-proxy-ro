@@ -14,3 +14,9 @@ BEGIN
   SELECT 2 AS b, 3 AS c;
 END//
 DELIMITER ;
+
+-- A second schema that exists on MariaDB only (the comment is code there).
+/*M! CREATE DATABASE mariaonly */;
+/*M! CREATE TABLE mariaonly.t2 (id int PRIMARY KEY) */;
+/*M! INSERT INTO mariaonly.t2 VALUES (1), (2) */;
+/*M! GRANT ALL ON mariaonly.* TO 'app'@'%' */;
