@@ -1,0 +1,14 @@
+# One file describes one database. Copy to params/mysql/<anything>.toml.
+
+host     = "mysql.example.internal"
+port     = 3306
+user     = "app_user"
+password = "secret"
+name     = "app_db"          # database name on the server
+
+# Optional. The name clients connect with; defaults to `name`.
+# Use it when two servers hold databases with the same name.
+# alias = "app_db_prod"
+
+# Optional: disable | prefer (default) | require | verify-full
+# sslmode = "prefer"

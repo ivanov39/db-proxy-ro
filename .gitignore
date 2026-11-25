@@ -33,5 +33,13 @@ go.work.sum
 .idea/
 .vscode/
 
-#
-params/
+# Database credentials: never commit them (see examples/params)
+/params/
+
+# Logs written by the container
+logs/*
+!logs/.gitkeep
+
+# Local scratch
+.tmp/
+/db-proxy-ro

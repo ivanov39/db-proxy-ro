@@ -1,0 +1,55 @@
+# Throw-away databases for the integration tests (see `make test-integration`).
+name: dbproxy-test
+
+services:
+  pg16:
+    image: postgres:16
+    environment: &pgenv
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: s3cret'pass
+      POSTGRES_DB: appdb
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["./init/pg.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: &pghealth
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb -h 127.0.0.1"]
+      interval: 1s
+      retries: 60
+
+  # Older than 14: does not report default_transaction_read_only to clients.
+  pg13:
+    image: postgres:13
+    environment: *pgenv
+    ports: ["127.0.0.1:55433:5432"]
+    volumes: ["./init/pg.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: *pghealth
+
+  mysql80:
+    image: mysql:8.0
+    environment: &myenv
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: app
+      MYSQL_PASSWORD: "s3cret-Pass#1"  # the image's entrypoint cannot escape a quote
+      MYSQL_DATABASE: appdb
+    ports: ["127.0.0.1:53306:3306"]
+    volumes: ["./init/mysql.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: &myhealth
+      test: ["CMD-SHELL", "mysql -uapp -p's3cret-Pass#1'  -h127.0.0.1 appdb -e 'select 1 from t limit 1'"]
+      interval: 1s
+      retries: 120
+
+  mysql57:
+    image: mysql:5.7
+    environment: *myenv
+    ports: ["127.0.0.1:53308:3306"]
+    volumes: ["./init/mysql.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: *myhealth
+
+  mariadb:
+    image: mariadb:11
+    environment: *myenv
+    ports: ["127.0.0.1:53307:3306"]
+    volumes: ["./init/mysql.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uapp -p's3cret-Pass#1'  -h127.0.0.1 appdb -e 'select 1 from t limit 1'"]
+      interval: 1s
+      retries: 120

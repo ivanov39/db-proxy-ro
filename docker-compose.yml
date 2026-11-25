@@ -1,0 +1,26 @@
+services:
+  db-proxy-ro:
+    build: .
+    image: db-proxy-ro:latest
+    container_name: db-proxy-ro
+    restart: unless-stopped
+
+    # Host networking: the proxy reaches databases exactly as the host does,
+    # including host DNS and VPN routes. It also means the proxy listens
+    # directly on the host, so keep the addresses below on 127.0.0.1 unless
+    # you really want to expose password-less database access to the network.
+    network_mode: host
+
+    # Run as the host user so that ./params is readable and ./logs is writable.
+    user: "${DBPROXY_UID:-1000}:${DBPROXY_GID:-1000}"
+
+    environment:
+      DBPROXY_PGSQL_LISTEN: ${DBPROXY_PGSQL_LISTEN:-127.0.0.1:25432}
+      DBPROXY_MYSQL_LISTEN: ${DBPROXY_MYSQL_LISTEN:-127.0.0.1:23306}
+      DBPROXY_LOG_LEVEL: ${DBPROXY_LOG_LEVEL:-info}
+      DBPROXY_CONNECT_TIMEOUT: ${DBPROXY_CONNECT_TIMEOUT:-10s}
+      DBPROXY_MYSQL_SERVER_VERSION: ${DBPROXY_MYSQL_SERVER_VERSION:-8.0.36-db-proxy-ro}
+
+    volumes:
+      - ./params:/params:ro
+      - ./logs:/logs
