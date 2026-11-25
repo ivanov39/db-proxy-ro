@@ -132,9 +132,21 @@ The guard is deliberately strict where SQL is ambiguous. A query is accepted
 only if it is harmless under every server setting that changes how it is
 parsed (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`).
 
-For the strongest guarantee, also give the proxy a database account that has
-only `SELECT` privileges. The proxy is then a second line of defence, not the
-only one.
+### What the proxy cannot guarantee, and how to close the gap
+
+Read-only mode is a property of the session, not of the connection: it is
+switched on when the session is opened and can, in principle, be switched off
+by a statement run inside it. The proxy refuses every such statement it knows
+of, but it cannot make the switch impossible. Only the database can:
+
+1. **Use an account that has only `SELECT` privileges.** Whatever reaches the
+   database, that account cannot write. This is the most reliable option.
+2. **Point the proxy at a read-only replica** instead of the primary, if you
+   have one. A replica does not accept writes at all.
+
+Both are done in the parameter files alone (`user`, `password`, `host`); the
+proxy needs no changes. With either in place the proxy is a second line of
+defence, not the only one.
 
 ## Limitations
 
